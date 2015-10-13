@@ -3,8 +3,9 @@ Tests for decompiler.py
 """
 from ast import AST, iter_fields, Module, parse
 import pytest
+from textwrap import dedent
 
-from ..decompiler import pycode_to_body
+from ..decompiler import DecompilationContext, paramnames, pycode_to_body
 
 
 def compare(left, right):
@@ -39,7 +40,15 @@ def check(text, ast_text=None):
     ast = parse(ast_text)
 
     code = compile(text, '<test>', 'exec')
-    decompiled_ast = Module(body=pycode_to_body(code, in_function=False))
+    decompiled_ast = Module(
+        body=pycode_to_body(
+            code,
+            DecompilationContext(
+                in_function=False,
+                next_store_is_function=False,
+            ),
+        )
+    )
 
     compare(ast, decompiled_ast)
 
@@ -144,3 +153,140 @@ def test_dict_literals():
     check("{1: 2, c: d}")
     check("{a: {b: c}, d: e}")
     check("{a: {b: [c, d, e]}}")
+
+
+def test_paramnames():
+
+    def foo(a, b):
+        x = 1
+        return x
+
+    args, kwonlyargs, varargs, varkwargs = paramnames(foo.__code__)
+    assert args == ('a', 'b')
+    assert kwonlyargs == ()
+    assert varargs is None
+    assert varkwargs is None
+
+    def bar(a, *, b):
+        x = 1
+        return x
+
+    args, kwonlyargs, varargs, varkwargs = paramnames(bar.__code__)
+    assert args == ('a',)
+    assert kwonlyargs == ('b',)
+    assert varargs is None
+    assert varkwargs is None
+
+    def fizz(a, **kwargs):
+        x = 1
+        return x
+
+    args, kwonlyargs, varargs, varkwargs = paramnames(fizz.__code__)
+    assert args == ('a',)
+    assert kwonlyargs == ()
+    assert varargs is None
+    assert varkwargs == 'kwargs'
+
+    def buzz(a, b=1, *args, c, d=3, **kwargs):
+        x = 1
+        return x
+
+    args, kwonlyargs, varargs, varkwargs = paramnames(buzz.__code__)
+    assert args == ('a', 'b')
+    assert kwonlyargs == ('c', 'd')
+    assert varargs == 'args'
+    assert varkwargs == 'kwargs'
+
+
+def test_function_signatures():
+    check(
+        dedent(
+            """\
+            def foo(a, b=1, *args, c, d=2, **kwargs):
+                return a + b
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(a=b + c):
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo():
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(a):
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(a, b):
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(*a, b):
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(a, **b):
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo(*a, **b):
+                return None
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """\
+            def foo(a=1, b=2, c=3):
+                return None
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """\
+            def foo(a, *, b=1, c=2, d=3):
+                return None
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """\
+            def foo(a, b=1, c=2, *, d, e=3, f, g=4):
+                return None
+            """
+        )
+    )
