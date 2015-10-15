@@ -1,11 +1,13 @@
 import ast
 from functools import singledispatch
-from inspect import getargs
+from itertools import chain
 import types
 
 from .code import Code, Flags
 from . import instructions as instrs
+from .utils.functional import partition
 from .utils.immutable import immutable
+from codetransformer import a as showa, d as showd  # noqa
 
 
 class DecompilationError(Exception):
@@ -29,17 +31,24 @@ def pycode_to_body(co, context):
     """
     Convert a Python code object to a list of AST body elements.
     """
+    code = Code.from_pycode(co)
+    return instrs_to_body(code.instrs, context)
+
+
+def instrs_to_body(instrs, context):
+    """
+    Convert a list of Instruction objects to a list of AST body nodes.
+    """
     stack = []
     body = []
-    code = Code.from_pycode(co)
-    for instr in code:
+    for instr in instrs:
         newcontext = process_instr(instr, stack, body, context)
         if newcontext:
             context = newcontext
 
     if stack:
         raise DecompilationError(
-            "Non-empty stack at the end of pycode_to_body(): %s." % stack
+            "Non-empty stack at the end of instrs_to_body(): %s." % stack
         )
     return body
 
@@ -58,14 +67,21 @@ def _instr(instr, stack, current_body, context):
     )
 
 
+@process_instr.register(instrs.BINARY_SUBSCR)
+@process_instr.register(instrs.LOAD_ATTR)
+@process_instr.register(instrs.LOAD_GLOBAL)
 @process_instr.register(instrs.LOAD_CONST)
 @process_instr.register(instrs.LOAD_FAST)
 @process_instr.register(instrs.LOAD_NAME)
+@process_instr.register(instrs.LOAD_DEREF)
+@process_instr.register(instrs.LOAD_CLOSURE)
 @process_instr.register(instrs.BUILD_TUPLE)
 @process_instr.register(instrs.BUILD_SET)
 @process_instr.register(instrs.BUILD_LIST)
 @process_instr.register(instrs.BUILD_MAP)
 @process_instr.register(instrs.STORE_MAP)
+@process_instr.register(instrs.CALL_FUNCTION)
+@process_instr.register(instrs.BUILD_SLICE)
 def _push(instr, stack, current_body, context):
     """
     Just push these instructions onto the stack for further processing
@@ -75,6 +91,7 @@ def _push(instr, stack, current_body, context):
 
 
 @process_instr.register(instrs.MAKE_FUNCTION)
+@process_instr.register(instrs.MAKE_CLOSURE)
 def _make_function(instr, stack, current_body, context):
     """
     Set the `post_make_function` flag on context, then `instr` onto the stack.
@@ -106,6 +123,59 @@ def _store(instr, stack, current_body, context):
             targets=[ast.Name(id=instr.arg, ctx=ast.Store())],
             value=make_expr(pop_arguments(instr, stack)),
         )
+    )
+
+
+@process_instr.register(instrs.STORE_GLOBAL)
+def _store_global(instr, stack, current_body, context):
+    if context.in_function:
+        current_body.append(ast.Global(names=[instr.arg]))
+    return _store(instr, stack, current_body, context)
+
+
+@process_instr.register(instrs.STORE_DEREF)
+def _store_deref(instr, stack, current_body, context):
+    if instr.vartype == 'cell':
+        current_body.append(ast.Nonlocal(names=[instr.arg]))
+    return _store(instr, stack, current_body, context)
+
+
+@process_instr.register(instrs.STORE_ATTR)
+def _store_attr(instr, stack, current_body, context):
+    target = make_expr(stack)
+    rhs = make_expr(stack)
+    current_body.append(
+        ast.Assign(
+            targets=[
+                ast.Attribute(
+                    value=target,
+                    attr=instr.arg,
+                    ctx=ast.Store(),
+                )
+            ],
+            value=rhs,
+        )
+    )
+
+
+@process_instr.register(instrs.STORE_SUBSCR)
+def _store_subscr(instr, stack, current_body, context):
+
+    slice_ = make_slice(stack)
+    collection = make_expr(stack)
+    rhs = make_expr(stack)
+
+    current_body.append(
+        ast.Assign(
+            targets=[
+                ast.Subscript(
+                    value=collection,
+                    slice=slice_,
+                    ctx=ast.Store(),
+                ),
+            ],
+            value=rhs,
+        ),
     )
 
 
@@ -213,10 +283,104 @@ def _dict_kv_pairs(build_instr, builders):
         yield make_expr(builders), make_expr(builders)
 
 
+@_make_expr.register(instrs.LOAD_DEREF)
 @_make_expr.register(instrs.LOAD_NAME)
+@_make_expr.register(instrs.LOAD_CLOSURE)
 @_make_expr.register(instrs.LOAD_FAST)
+@_make_expr.register(instrs.LOAD_GLOBAL)
 def _make_expr_name(toplevel, stack_builders):
     return ast.Name(id=toplevel.arg, ctx=ast.Load())
+
+
+@_make_expr.register(instrs.LOAD_ATTR)
+def _make_expr_attr(toplevel, stack_builders):
+    return ast.Attribute(
+        value=make_expr(stack_builders),
+        attr=toplevel.arg,
+        ctx=ast.Load(),
+    )
+
+
+@_make_expr.register(instrs.BINARY_SUBSCR)
+def _make_expr_getitem(toplevel, stack_builders):
+    slice_ = make_slice(stack_builders)
+    value = make_expr(stack_builders)
+    return ast.Subscript(slice=slice_, value=value, ctx=ast.Load())
+
+
+def make_slice(stack_builders):
+    """
+    Make an expression in the context of a slice.
+
+    This mostly delegates to _make_expr, but wraps nodes in `ast.Index` or
+    `ast.Slice` as appropriate.
+    """
+    return _make_slice(stack_builders.pop(), stack_builders)
+
+
+@singledispatch
+def _make_slice(toplevel, stack_builders):
+    return ast.Index(_make_expr(toplevel, stack_builders))
+
+
+@_make_slice.register(instrs.BUILD_SLICE)
+def make_slice_build_slice(toplevel, stack_builders):
+    return _make_expr(toplevel, stack_builders)
+
+
+@_make_slice.register(instrs.BUILD_TUPLE)
+def make_slice_tuple(toplevel, stack_builders):
+    slice_ = _make_expr(toplevel, stack_builders)
+    if isinstance(slice_, ast.Tuple):
+        # a = b[c, d] generates Index(value=Tuple(...))
+        # a = b[c:, d] generates ExtSlice(dims=[Slice(...), Index(...)])
+        slice_ = normalize_tuple_slice(slice_)
+    return slice_
+
+
+def normalize_tuple_slice(node):
+    """
+    Normalize an ast.Tuple node representing the internals of a slice.
+
+    Returns the node wrapped in an ast.Index.
+    Returns an ExtSlice node built from the tuple elements if there are any
+    slices.
+    """
+    if not any(isinstance(elt, ast.Slice) for elt in node.elts):
+        return ast.Index(value=node)
+
+    return ast.ExtSlice(
+        [
+            # Wrap non-Slice nodes in Index nodes.
+            elt if isinstance(elt, ast.Slice) else ast.Index(value=elt)
+            for elt in node.elts
+        ]
+    )
+
+
+@_make_expr.register(instrs.BUILD_SLICE)
+def _make_expr_build_slice(toplevel, stack_builders):
+    # Arg is always either 2 or 3.  If it's 3, then the first expression is the
+    # step value.
+    if toplevel.arg == 3:
+        step = make_expr(stack_builders)
+    else:
+        step = None
+
+    def normalize_empty_slice(node):
+        """
+        Convert LOAD_CONST(None) to just None.
+
+        This normalizes slices of the form a[b:None] to just a[b:].
+        """
+        if isinstance(node, ast.NameConstant) and node.value is None:
+            return None
+        return node
+
+    upper = normalize_empty_slice(make_expr(stack_builders))
+    lower = normalize_empty_slice(make_expr(stack_builders))
+
+    return ast.Slice(lower=lower, upper=upper, step=step)
 
 
 @_make_expr.register(instrs.LOAD_CONST)
@@ -323,7 +487,7 @@ def make_function(default_builders,
     )
 
     return ast.FunctionDef(
-        name=name,
+        name=name.split('.')[-1],
         args=ast.arguments(
             args=[ast.arg(arg=arg, annotation=None) for arg in args],
             kwonlyargs=[ast.arg(arg=arg, annotation=None) for arg in kwonly],
@@ -336,14 +500,48 @@ def make_function(default_builders,
                 arg=varkwargs, annotation=None
             ),
         ),
-        body=pycode_to_body(
-            co,
-            DecompilationContext(
-                in_function=True,
-                next_store_is_function=False,
+        body=dedupe_global_and_nonlocal_decls(
+            pycode_to_body(
+                co,
+                DecompilationContext(
+                    in_function=True,
+                    next_store_is_function=False,
+                )
             )
-        )
+        ),
+        decorator_list=[],
+        returns=None,
     )
+
+
+def is_declaration(node):
+    return isinstance(node, (ast.Nonlocal, ast.Global))
+
+
+def dedupe_global_and_nonlocal_decls(body):
+    """
+    Remove duplicate `ast.Global` and `ast.Nonlocal` nodes from the body of a
+    function.
+    """
+    decls, non_decls = map(list, partition(is_declaration, body))
+    globals_, nonlocals_ = partition(
+        lambda n: isinstance(n, ast.Global), decls
+    )
+
+    deduped = []
+    global_names = list(
+        set(chain.from_iterable(node.names for node in globals_))
+    )
+    if global_names:
+        deduped.append(ast.Global(global_names))
+
+    nonlocal_names = list(
+        set(chain.from_iterable(node.names for node in nonlocals_))
+    )
+    if nonlocal_names:
+        deduped.append(ast.Nonlocal(nonlocal_names))
+
+    return deduped + list(non_decls)
 
 
 def default_exprs(make_function_instr, default_builders):
@@ -464,9 +662,10 @@ def _check_make_function_instrs(load_code_instr,
         )
 
     # Validate make_function_instr
-    if not isinstance(make_function_instr, instrs.MAKE_FUNCTION):
+    if not isinstance(make_function_instr, (instrs.MAKE_FUNCTION,
+                                            instrs.MAKE_CLOSURE)):
         raise TypeError(
-            "make_function expected a MAKE_FUNCTION "
+            "make_function expected a MAKE_FUNCTION or MAKE_CLOSURE"
             "instruction, but got %s instead." % make_function_instr
         )
 

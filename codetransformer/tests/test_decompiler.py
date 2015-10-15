@@ -2,30 +2,34 @@
 Tests for decompiler.py
 """
 from ast import AST, iter_fields, Module, parse
-import pytest
+from itertools import product, zip_longest
 from textwrap import dedent
+
+import pytest
+from toolz.curried.operator import add
 
 from ..decompiler import DecompilationContext, paramnames, pycode_to_body
 
 
-def compare(left, right):
+def compare(computed, expected):
     """
     Assert that two AST nodes are the same.
     """
-    assert type(left) == type(right)
+    assert type(computed) == type(expected)
 
-    if isinstance(left, list):
-        for lv, rv in zip(left, right):
-            compare(lv, rv)
+    if isinstance(computed, list):
+        for cv, ev in zip_longest(computed, expected):
+            compare(cv, ev)
         return
 
-    if not isinstance(left, AST):
-        assert left == right
+    if not isinstance(computed, AST):
+        assert computed == expected
         return
 
-    for (ln, lv), (rn, rv) in zip(iter_fields(left), iter_fields(right)):
-        assert ln == rn
-        compare(lv, rv)
+    for (cn, cv), (en, ev) in zip_longest(*map(iter_fields,
+                                               (computed, expected))):
+        assert cn == en
+        compare(cv, ev)
 
 
 def check(text, ast_text=None):
@@ -40,6 +44,7 @@ def check(text, ast_text=None):
     ast = parse(ast_text)
 
     code = compile(text, '<test>', 'exec')
+
     decompiled_ast = Module(
         body=pycode_to_body(
             code,
@@ -50,7 +55,7 @@ def check(text, ast_text=None):
         )
     )
 
-    compare(ast, decompiled_ast)
+    compare(decompiled_ast, ast)
 
 
 def test_trivial_expr():
@@ -102,21 +107,21 @@ def test_bytes_literal():
 
 
 def test_int_literal():
-    check("1")
+    check("1", "")  # This gets constant-folded out
     check("a = 1")
     check("a = 1 + b")
     check("a = b + 1")
 
 
 def test_float_literal():
-    check('1.0')
+    check('1.0', "")   # This gets constant-folded out
     check("a = 1.0")
     check("a = 1.0 + b")
     check("a = b + 1.0")
 
 
 def test_complex_literal():
-    check('1.0j')
+    check('1.0j', "")  # This gets constant-folded out
     check("a = 1.0j")
     check("a = 1.0j + b")
     check("a = b + 1.0j")
@@ -198,95 +203,146 @@ def test_paramnames():
     assert varkwargs == 'kwargs'
 
 
-def test_function_signatures():
-    check(
-        dedent(
+@pytest.mark.parametrize(
+    "signature,body",
+    product(
+        [
+            "()",
+            "(a)",
+            "(a, b)",
+            "(*a, b)",
+            "(a, **b)",
+            "(*a, **b)",
+            "(a=1, b=2, c=3)",
+            "(a, *, b=1, c=2, d=3)",
+            "(a, b=1, c=2, *, d, e=3, f, g=4)",
+            "(a, b=1, *args, c, d=2, **kwargs)",
+            "(a, b=c + d, *, e=f + g)",
+        ],
+        [
             """\
-            def foo(a, b=1, *args, c, d=2, **kwargs):
-                return a + b
+            return a + b
+            """,
+            """\
+            x = 1
+            y = 2
+            return x + y
+            """,
+            """\
+            x = 3
+            def bar(m, n):
+                global x
+                x = 4
+                return m + n + x
+            return None
+            """,
+            """\
+            def bar():
+                x = 3
+                def buzz():
+                    nonlocal x
+                    x = 4
+                    return x
+                return x
+            return None
             """
+        ],
+    ),
+)
+def test_function_signatures(signature, body):
+    body = '\n'.join(
+        map(
+            add("    "),
+            dedent(body).splitlines(),
         )
     )
     check(
         dedent(
             """\
-            def foo(a=b + c):
+            def foo{signature}:
+            {body}
+            """
+        ).format(signature=signature, body=body)
+    )
+
+
+def test_store_twice_to_global():
+    check(
+        dedent(
+            """\
+            x = 3
+            def foo():
+                global x
+                x = 4
+                x = 5
                 return None
             """
         )
     )
+
+
+def test_store_twice_to_nonlocal():
     check(
         dedent(
             """\
             def foo():
-                return None
-            """
-        )
-    )
-    check(
-        dedent(
-            """\
-            def foo(a):
-                return None
-            """
-        )
-    )
-    check(
-        dedent(
-            """\
-            def foo(a, b):
-                return None
-            """
-        )
-    )
-    check(
-        dedent(
-            """\
-            def foo(*a, b):
-                return None
-            """
-        )
-    )
-    check(
-        dedent(
-            """\
-            def foo(a, **b):
-                return None
-            """
-        )
-    )
-    check(
-        dedent(
-            """\
-            def foo(*a, **b):
+                x = 1
+                def bar():
+                    nonlocal x
+                    x = 2
+                    x = 3
+                    return None
                 return None
             """
         )
     )
 
-    check(
-        dedent(
-            """\
-            def foo(a=1, b=2, c=3):
-                return None
-            """
-        )
-    )
 
-    check(
-        dedent(
-            """\
-            def foo(a, *, b=1, c=2, d=3):
-                return None
-            """
-        )
-    )
+def test_getattr():
+    check("a.b")
+    check("a.b.c")
+    check("a.b.c + a.b.c")
 
-    check(
-        dedent(
-            """\
-            def foo(a, b=1, c=2, *, d, e=3, f, g=4):
-                return None
-            """
-        )
-    )
+    check("(1).real")
+    check("1..real")
+
+    check("(a + b).c")
+
+    check("a = b.c")
+
+
+def test_setattr():
+    check("a.b = c")
+    check("a.b.c = d")
+    check("a.b.c = d.e.f")
+    check("(a + b).c = (d + e).f")
+
+
+def test_getitem():
+    check("a = b[c]")
+    check("a = b[c:]")
+    check("a = b[:c]")
+    check("a = b[c::]")
+    check("a = b[c:d]")
+    check("a = b[c:d:e]")
+
+    check("a = b[c, d]")
+    check("a = b[c:, d]")
+    check("a = b[c:d:e, f:g:h, i:j:k]")
+
+    check("a = b[c + d][e]")
+
+
+def test_setitem():
+    check("a[b] = c")
+    check("b[c:] = a")
+    check("b[:c] = a")
+    check("b[c::] = a")
+    check("b[c:d] = a")
+    check("b[c:d:e] = a")
+
+    check("b[c, d] = a")
+    check("b[c:, d] = a")
+    check("b[c:d:e, f:g:h, i:j:k] = a")
+
+    check("b[c + d][e] = a")

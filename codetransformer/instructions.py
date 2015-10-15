@@ -240,6 +240,7 @@ for name, opcode in opmap.items():
     if name.startswith('CALL_FUNCTION'):
         class_.__init__ = _mk_call_init(class_)
         class_.__repr__ = _call_repr
+
     del class_
 
 

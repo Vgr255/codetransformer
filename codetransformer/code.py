@@ -88,8 +88,8 @@ def _freevar_argname(arg, cellvars, freevars):
     """
     len_cellvars = len(cellvars)
     if arg < len_cellvars:
-        return cellvars[arg]
-    return freevars[arg - len_cellvars]
+        return cellvars[arg], 'cell'
+    return freevars[arg - len_cellvars], 'free'
 
 
 class Code:
@@ -275,7 +275,7 @@ class Code:
             elif instr.uses_varname:
                 instr.arg = co.co_varnames[instr.arg]
             elif instr.uses_free:
-                instr.arg = _freevar_argname(
+                instr.arg, instr.vartype = _freevar_argname(
                     instr.arg,
                     co.co_freevars,
                     co.co_cellvars,
