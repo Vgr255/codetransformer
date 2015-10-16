@@ -555,3 +555,42 @@ def test_import_from():
 def test_import_star():
     check("from a import *")
     check("from a.b.c import *")
+
+
+def test_import_in_function():
+    check(
+        dedent(
+            """\
+            def foo():
+                import a.b.c as d
+                from e.f import g
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo():
+                global d, g
+                import a.b.c as d
+                from e.f import g
+                return None
+            """
+        )
+    )
+    check(
+        dedent(
+            """\
+            def foo():
+                d = None
+                g = None
+                def bar():
+                    nonlocal d, g
+                    import a.b.c as d
+                    from e.f import g
+                    return None
+                return None
+            """
+        )
+    )

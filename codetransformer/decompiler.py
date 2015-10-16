@@ -114,17 +114,16 @@ def _process_instr_import_name(instr, queue, stack, body, context):
     module = instr.arg
     if fromlist is None:  # Regular import.
         _pop_import_LOAD_ATTRs(module, queue)
-        store_name = expect_instruction(
-            queue.popleft(), instrs.STORE_NAME, "after IMPORT_NAME"
-        )
-        asname = store_name.arg
+        store = queue.popleft()
+        update_global_and_nonlocal_decls(store, body, context)
+        asname = store.arg
         body.append(
             ast.Import(
                 names=[
                     ast.alias(
                         name=module,
                         asname=(
-                            asname if asname != module.split('.')[0] else None,
+                            asname if asname != module.split('.')[0] else None
                         )
                     ),
                 ],
@@ -147,7 +146,7 @@ def _process_instr_import_name(instr, queue, stack, body, context):
 
     # Consume a pair of IMPORT_FROM, STORE_NAME instructions for each entry in
     # fromlist.
-    names = list(map(make_importfrom_alias(queue), fromlist))
+    names = list(map(make_importfrom_alias(queue, body, context), fromlist))
     body.append(ast.ImportFrom(module=module, names=names, level=level))
 
     # Remove the final POP_TOP of the imported module.
@@ -186,7 +185,7 @@ def _pop_import_LOAD_ATTRs(module_name, queue):
 
 
 @curry
-def make_importfrom_alias(queue, name):
+def make_importfrom_alias(queue, body, context, name):
     """
     Make an ast.alias node for the names list of an ast.ImportFrom.
 
@@ -194,6 +193,9 @@ def make_importfrom_alias(queue, name):
     ----------
     queue : deque
         Instruction Queue
+    body : list
+        Current body.
+    context : DecompilationContext
     name : str
         Expected name of the IMPORT_FROM node to be popped.
 
@@ -205,11 +207,11 @@ def make_importfrom_alias(queue, name):
     ------------
     Consumes IMPORT_FROM and STORE_NAME instructions from queue.
     """
-    import_from, store_name = queue.popleft(), queue.popleft()
+    import_from, store = queue.popleft(), queue.popleft()
     expect_instruction(
         import_from, instrs.IMPORT_FROM, "after IMPORT_NAME"
     )
-    expect_instruction(store_name, instrs.STORE_NAME, "after IMPORT_FROM")
+    update_global_and_nonlocal_decls(store, body, context)
     if not import_from.arg == name:
         raise DecompilationError(
             "IMPORT_FROM name mismatch. Expected %r, but got %s." % (
@@ -218,7 +220,7 @@ def make_importfrom_alias(queue, name):
         )
     return ast.alias(
         name=name,
-        asname=store_name.arg if store_name.arg != name else None,
+        asname=store.arg if store.arg != name else None,
     )
 
 
@@ -265,7 +267,10 @@ def _make_function(instr, queue, stack, body, context):
 
 @_process_instr.register(instrs.STORE_FAST)
 @_process_instr.register(instrs.STORE_NAME)
+@_process_instr.register(instrs.STORE_DEREF)
+@_process_instr.register(instrs.STORE_GLOBAL)
 def _store(instr, queue, stack, body, context):
+    update_global_and_nonlocal_decls(instr, body, context)
     # This is set by MAKE_FUNCTION nodes to register that the next `STORE_NAME`
     # should create a FunctionDef node.
     if context.make_function_context is not None:
@@ -285,18 +290,29 @@ def _store(instr, queue, stack, body, context):
     )
 
 
-@_process_instr.register(instrs.STORE_GLOBAL)
-def _store_global(instr, queue, stack, body, context):
-    if context.in_function:
-        body.append(ast.Global(names=[instr.arg]))
-    return _store(instr, queue, stack, body, context)
+@singledispatch
+def update_global_and_nonlocal_decls(instr, body, context):
+    raise DecompilationError(
+        "Can't update global/nonlocal declarations with %s" % instr
+    )
 
 
-@_process_instr.register(instrs.STORE_DEREF)
-def _store_deref(instr, queue, stack, body, context):
+@update_global_and_nonlocal_decls.register(instrs.STORE_DEREF)
+def _update_decls_deref(instr, body, context):
     if instr.vartype == 'cell':
         body.append(ast.Nonlocal(names=[instr.arg]))
-    return _store(instr, queue, stack, body, context)
+
+
+@update_global_and_nonlocal_decls.register(instrs.STORE_GLOBAL)
+def _update_decls_global(instr, body, context):
+    if context.in_function:
+        body.append(ast.Global(names=[instr.arg]))
+
+
+@update_global_and_nonlocal_decls.register(instrs.STORE_FAST)
+@update_global_and_nonlocal_decls.register(instrs.STORE_NAME)
+def _update_decls_noop(instr, body, context):
+    pass
 
 
 @_process_instr.register(instrs.STORE_ATTR)
@@ -1054,13 +1070,15 @@ def dedupe_global_and_nonlocal_decls(body):
 
     deduped = []
     global_names = list(
-        set(chain.from_iterable(node.names for node in globals_))
+        sorted(
+            set(chain.from_iterable(node.names for node in globals_))
+        )
     )
     if global_names:
         deduped.append(ast.Global(global_names))
 
     nonlocal_names = list(
-        set(chain.from_iterable(node.names for node in nonlocals_))
+        sorted(set(chain.from_iterable(node.names for node in nonlocals_)))
     )
     if nonlocal_names:
         deduped.append(ast.Nonlocal(nonlocal_names))
