@@ -4,12 +4,12 @@ from functools import singledispatch
 from itertools import chain
 import types
 
-from toolz import complement, compose
+from toolz import complement, compose, curry
 import toolz.curried.operator as op
 
 from .code import Code, Flags
 from . import instructions as instrs
-from .utils.functional import partition, not_a
+from .utils.functional import partition, not_a, is_a
 from .utils.immutable import immutable
 from codetransformer import a as showa, d as showd  # noqa
 
@@ -88,7 +88,138 @@ def _instr(instr, queue, stack, body, context):
 
 @_process_instr.register(instrs.EXTENDED_ARG)
 def _process_instr_extended_arg(instr, queue, stack, body, context):
+    """We account for EXTENDED_ARG when constructing Code objects."""
     pass
+
+
+@_process_instr.register(instrs.IMPORT_NAME)
+def _process_instr_import_name(instr, queue, stack, body, context):
+    """
+    Process an IMPORT_NAME instruction.
+
+    Side Effects
+    ------------
+    Pops two instuctions from `stack`
+    Consumes instructions from `queue` to the end of the import statement.
+    Appends an ast.Import or ast.ImportFrom node to `body`.
+    """
+    # If this is "import module", fromlist is None.
+    # If this this is "from module import a, b fromlist will be ('a', 'b').
+    fromlist = stack.pop().arg
+
+    # (optimization) level argument to __import__.  Should be 0, 1, or 2.
+    # Doesn't affect the AST.
+    level = stack.pop().arg
+
+    module = instr.arg
+    if fromlist is None:  # Regular import.
+        _pop_import_LOAD_ATTRs(module, queue)
+        store_name = expect_instruction(
+            queue.popleft(), instrs.STORE_NAME, "after IMPORT_NAME"
+        )
+        asname = store_name.arg
+        body.append(
+            ast.Import(
+                names=[
+                    ast.alias(
+                        name=module,
+                        asname=(
+                            asname if asname != module.split('.')[0] else None,
+                        )
+                    ),
+                ],
+                level=level,
+            ),
+        )
+        return
+    elif fromlist == ('*',):  # From module import *.
+        expect_instruction(
+            queue.popleft(), instrs.IMPORT_STAR, "after IMPORT_NAME"
+        )
+        body.append(
+            ast.ImportFrom(
+                module=module,
+                names=[ast.alias(name='*', asname=None)],
+                level=level,
+            ),
+        )
+        return
+
+    # Consume a pair of IMPORT_FROM, STORE_NAME instructions for each entry in
+    # fromlist.
+    names = list(map(make_importfrom_alias(queue), fromlist))
+    body.append(ast.ImportFrom(module=module, names=names, level=level))
+
+    # Remove the final POP_TOP of the imported module.
+    expect_instruction(queue.popleft(), instrs.POP_TOP, "after 'from import'")
+
+
+def _pop_import_LOAD_ATTRs(module_name, queue):
+    """
+    Pop LOAD_ATTR instructions for an import of the form::
+
+        import a.b.c as d
+
+    which should generate bytecode like this::
+
+        1           0 LOAD_CONST               0 (0)
+                    3 LOAD_CONST               1 (None)
+                    6 IMPORT_NAME              0 (a.b.c.d)
+                    9 LOAD_ATTR                1 (b)
+                   12 LOAD_ATTR                2 (c)
+                   15 LOAD_ATTR                3 (d)
+                   18 STORE_NAME               3 (d)
+
+    We don't need the LOAD_ATTRs to generate the correct AST, so we just throw
+    it away.
+    """
+    popped = list(popwhile(is_a(instrs.LOAD_ATTR), queue, side='left'))
+    if popped:
+        expected = module_name.split('.', maxsplit=1)[1]
+        actual = '.'.join(map(op.attrgetter('arg'), popped))
+        if expected != actual:
+            raise DecompilationError(
+                "Decompiling import of module %s, but LOAD_ATTRS imply %s" % (
+                    expected, actual,
+                )
+            )
+
+
+@curry
+def make_importfrom_alias(queue, name):
+    """
+    Make an ast.alias node for the names list of an ast.ImportFrom.
+
+    Parameters
+    ----------
+    queue : deque
+        Instruction Queue
+    name : str
+        Expected name of the IMPORT_FROM node to be popped.
+
+    Returns
+    -------
+    alias : ast.alias
+
+    Side Effects
+    ------------
+    Consumes IMPORT_FROM and STORE_NAME instructions from queue.
+    """
+    import_from, store_name = queue.popleft(), queue.popleft()
+    expect_instruction(
+        import_from, instrs.IMPORT_FROM, "after IMPORT_NAME"
+    )
+    expect_instruction(store_name, instrs.STORE_NAME, "after IMPORT_FROM")
+    if not import_from.arg == name:
+        raise DecompilationError(
+            "IMPORT_FROM name mismatch. Expected %r, but got %s." % (
+                name, import_from,
+            )
+        )
+    return ast.alias(
+        name=name,
+        asname=store_name.arg if store_name.arg != name else None,
+    )
 
 
 @_process_instr.register(instrs.UNARY_NOT)
@@ -106,6 +237,9 @@ def _process_instr_extended_arg(instr, queue, stack, body, context):
 @_process_instr.register(instrs.BUILD_MAP)
 @_process_instr.register(instrs.STORE_MAP)
 @_process_instr.register(instrs.CALL_FUNCTION)
+@_process_instr.register(instrs.CALL_FUNCTION_VAR)
+@_process_instr.register(instrs.CALL_FUNCTION_KW)
+@_process_instr.register(instrs.CALL_FUNCTION_VAR_KW)
 @_process_instr.register(instrs.BUILD_SLICE)
 def _push(instr, queue, stack, body, context):
     """
@@ -477,6 +611,92 @@ def _make_expr_unary_not(toplevel, stack_builders):
     )
 
 
+@_make_expr.register(instrs.CALL_FUNCTION)
+def _make_expr_call_function(toplevel, stack_builders):
+    keywords = make_call_keywords(stack_builders, toplevel.keyword)
+    positionals = make_call_positionals(stack_builders, toplevel.positional)
+    return ast.Call(
+        func=make_expr(stack_builders),
+        args=positionals,
+        keywords=keywords,
+        starargs=None,
+        kwargs=None,
+    )
+
+
+@_make_expr.register(instrs.CALL_FUNCTION_VAR)
+def _make_expr_call_function_var(toplevel, stack_builders):
+    starargs = make_expr(stack_builders)
+    keywords = make_call_keywords(stack_builders, toplevel.keyword)
+    positionals = make_call_positionals(stack_builders, toplevel.positional)
+    return ast.Call(
+        func=make_expr(stack_builders),
+        args=positionals,
+        keywords=keywords,
+        starargs=starargs,
+        kwargs=None,
+    )
+
+
+@_make_expr.register(instrs.CALL_FUNCTION_KW)
+def _make_expr_call_function_kw(toplevel, stack_builders):
+    kwargs = make_expr(stack_builders)
+    keywords = make_call_keywords(stack_builders, toplevel.keyword)
+    positionals = make_call_positionals(stack_builders, toplevel.positional)
+    return ast.Call(
+        func=make_expr(stack_builders),
+        args=positionals,
+        keywords=keywords,
+        starargs=None,
+        kwargs=kwargs,
+    )
+
+
+@_make_expr.register(instrs.CALL_FUNCTION_VAR_KW)
+def _make_expr_call_function_var_kw(toplevel, stack_builders):
+    kwargs = make_expr(stack_builders)
+    starargs = make_expr(stack_builders)
+    keywords = make_call_keywords(stack_builders, toplevel.keyword)
+    positionals = make_call_positionals(stack_builders, toplevel.positional)
+    return ast.Call(
+        func=make_expr(stack_builders),
+        args=positionals,
+        keywords=keywords,
+        starargs=starargs,
+        kwargs=kwargs,
+    )
+
+
+def make_call_keywords(stack_builders, count):
+    """
+    Make the keywords entry for an ast.Call node.
+    """
+    out = []
+    for _ in range(count):
+        value = make_expr(stack_builders)
+        load_kwname = stack_builders.pop()
+        if not isinstance(load_kwname, instrs.LOAD_CONST):
+            raise DecompilationError(
+                "Expected a LOAD_CONST, but got %s" % load_kwname
+            )
+        if not isinstance(load_kwname.arg, str):
+            raise DecompilationError(
+                "Expected LOAD_CONST of a str, but got %s." % load_kwname,
+            )
+        out.append(ast.keyword(arg=load_kwname.arg, value=value))
+    out.reverse()
+    return out
+
+
+def make_call_positionals(stack_builders, count):
+    """
+    Make the args entry for an ast.Call node.
+    """
+    out = [make_expr(stack_builders) for _ in range(count)]
+    out.reverse()
+    return out
+
+
 @_make_expr.register(instrs.BUILD_TUPLE)
 def _make_expr_tuple(toplevel, stack_builders):
     elts = [make_expr(stack_builders) for _ in range(toplevel.arg)]
@@ -733,13 +953,17 @@ for instrtype, nodetype in binops:
 def make_function(function_builders, *, closure):
     """
     Construct a FunctionDef AST node from a sequence of the form:
-    <decorator builders>
-    <default builders>,
-    <annotation builders>
+
+    LOAD_CLOSURE, N times (when handling MAKE_CLOSURE)
+    BUILD_TUPLE(N) (when handling MAKE_CLOSURE)
+    <decorator builders> (optional)
+    <default builders>, (optional)
+    <annotation builders> (optional)
+    LOAD_CONST(<tuple of annotated names>) (optional)
     LOAD_CONST(code),
     LOAD_CONST(name),
     MAKE_FUNCTION | MAKE_CLOSURE()
-    <decorator calls>
+    <decorator calls> (optional)
     """
     decorator_calls = deque()
     while isinstance(function_builders[-1], instrs.CALL_FUNCTION):
@@ -760,7 +984,7 @@ def make_function(function_builders, *, closure):
 
     args, kwonly, varargs, varkwargs = paramnames(co)
 
-    # Convert default and annotation builders.
+    # Convert default and annotation builders to AST nodes.
     defaults, kw_defaults, annotations = make_defaults_and_annotations(
         make_function_instr,
         builders,
@@ -1019,6 +1243,19 @@ def _check_stack_for_module_return(stack):
             "Reached end of non-function code "
             "block with unexpected stack: %s." % stack
         )
+
+
+def expect_instruction(instr, expected, context):
+    """
+    Check that an instruction is of the expected type.
+    """
+    if not isinstance(instr, expected):
+        raise DecompilationError(
+            "Expected a {expected} instruction {context}. Got {instr}.".format(
+                instr=instr, expected=expected, context=context,
+            )
+        )
+    return instr
 
 
 def popwhile(cond, queue, *, side):

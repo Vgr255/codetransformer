@@ -8,6 +8,7 @@ from textwrap import dedent
 import pytest
 from toolz.curried.operator import add
 
+from codetransformer import a as show  # noqa
 from ..decompiler import DecompilationContext, paramnames, pycode_to_body
 
 
@@ -175,6 +176,23 @@ def test_dict_literals():
     check("{a: {b: [c, d, e]}}")
 
 
+def test_function_call():
+    check("f()")
+    check("f(a, b, c=1, d=2)")
+
+    check("f(*args)")
+    check("f(a, b=1, *args)")
+
+    check("f(**kwargs)")
+    check("f(a, b=1, **kwargs)")
+
+    check("f(*args, **kwargs)")
+    check("f(a, b=1, *args, **kwargs)")
+
+    check("(a + b)()")
+    check("a().b.c.d()")
+
+
 def test_paramnames():
 
     def foo(a, b):
@@ -240,7 +258,6 @@ def test_annotations():
     )
 
 
-
 @pytest.mark.parametrize(
     "signature,body",
     product(
@@ -303,7 +320,8 @@ def test_decorators():
         dedent(
             """
             @decorator2
-            @decorator1.attr1.attr2
+            @decorator1()
+            @decorator0.attr.attr
             def foo(a, b=1, *, c, d=2):
                 @decorator3
                 def bar(c, d):
@@ -500,3 +518,40 @@ def test_while_False():
         ),
         ""
     )
+
+
+def test_import():
+    check("import a as b")
+    check("import a.b as c")
+    # These generate identical bytecode.
+    check(
+        "import a, b",
+        dedent(
+            """\
+            import a
+            import b
+            """
+        )
+    )
+    check("import a.b.c")
+    # These generate identical bytecode.
+    check(
+        "import a.b.c as d, e.f.g as h",
+        dedent(
+            """
+            import a.b.c as d
+            import e.f.g as h
+            """
+        )
+    )
+
+
+def test_import_from():
+    check("from a import b")
+    check("from a import b, c as d, d")
+    check("from a.b import c, d as e, f as g")
+
+
+def test_import_star():
+    check("from a import *")
+    check("from a.b.c import *")

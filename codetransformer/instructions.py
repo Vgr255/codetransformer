@@ -218,17 +218,17 @@ def _mk_call_init(class_):
             arg = packed
         else:
             raise TypeError('cannot specify packed and unpacked arguments')
+        self.positional, self.keyword = arg.to_bytes(2, 'little')
         super(class_, self).__init__(arg)
 
     return __init__
 
 
 def _call_repr(self):
-    positional, keyword = self.arg.to_bytes(2, 'little')
     return '%s(positional=%d, keyword=%d)' % (
         type(self).__name__,
-        positional,
-        keyword,
+        self.positional,
+        self.keyword,
     )
 
 
