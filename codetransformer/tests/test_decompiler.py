@@ -2,13 +2,25 @@
 Tests for decompiler.py
 """
 from ast import AST, iter_fields, Module, parse
-from itertools import product, zip_longest
+from itertools import product, zip_longest, combinations_with_replacement
 from textwrap import dedent
 
 import pytest
 from toolz.curried.operator import add
 
 from ..decompiler import DecompilationContext, paramnames, pycode_to_body
+
+
+def make_indented_body(body_str):
+    """
+    Helper for generating an indented string to use as the body of a function.
+    """
+    return '\n'.join(
+        map(
+            add("    "),
+            dedent(body_str).splitlines(),
+        )
+    )
 
 
 def compare(computed, expected):
@@ -64,6 +76,12 @@ def test_trivial_expr():
 
 def test_trivial_expr_assign():
     check("a = b")
+
+
+def test_unary_not():
+    check("a = not b")
+    check("a = not not b")
+    check("a = not ((not a) + b)")
 
 
 @pytest.mark.parametrize(
@@ -203,6 +221,17 @@ def test_paramnames():
     assert varkwargs == 'kwargs'
 
 
+def test_simple_function():
+    check(
+        dedent(
+            """\
+            def foo(a, b):
+                return a + b
+            """
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "signature,body",
     product(
@@ -250,19 +279,30 @@ def test_paramnames():
     ),
 )
 def test_function_signatures(signature, body):
-    body = '\n'.join(
-        map(
-            add("    "),
-            dedent(body).splitlines(),
-        )
-    )
     check(
         dedent(
             """\
             def foo{signature}:
             {body}
             """
-        ).format(signature=signature, body=body)
+        ).format(signature=signature, body=make_indented_body(body))
+    )
+
+
+def test_decorators():
+    check(
+        dedent(
+            """
+            @decorator2
+            @decorator1.attr1.attr2
+            def foo(a, b=1, *, c, d=2):
+                @decorator3
+                def bar(c, d):
+                    x = 1
+                    return None
+                return None
+            """
+        )
     )
 
 
@@ -346,3 +386,108 @@ def test_setitem():
     check("b[c:d:e, f:g:h, i:j:k] = a")
 
     check("b[c + d][e] = a")
+
+
+LOOP_BODIES = tuple(map(
+    '\n'.join,
+    combinations_with_replacement(
+        [
+            "x = 1",
+            "break",
+            "continue",
+            dedent(
+                """\
+                while u + v:
+                    w = z
+                """,
+            ),
+            dedent(
+                """\
+                for u in v:
+                    w = z
+                """,
+            ),
+        ],
+        3,
+    ),
+))
+
+ORELSE_BODIES = ["", "x = 3"]
+
+
+@pytest.mark.parametrize(
+    "loop,body,else_body",
+    product(
+        [
+            "for a in b:",
+            "for a in b.c.d:",
+        ],
+        LOOP_BODIES,
+        ORELSE_BODIES,
+    )
+)
+def test_for(loop, body, else_body):
+    check(
+        dedent(
+            """\
+            {loop}
+            {body}
+            {else_}
+            {else_body}
+            x = 4
+            """
+        ).format(
+            loop=loop,
+            body=make_indented_body(body),
+            else_="else:" if else_body else "",
+            else_body=make_indented_body(else_body) if else_body else "",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "condition,body,else_body",
+    product(
+        [
+            "a",
+            "not a",
+            "not not a",
+            "a.b.c.d",
+            "not a.b.c.d",
+            "True",
+        ],
+        LOOP_BODIES,
+        ORELSE_BODIES,
+    )
+)
+def test_while(condition, body, else_body):
+    check(
+        dedent(
+            """\
+            while {condition}:
+            {body}
+            {else_}
+            {else_body}
+            x = 4
+            """
+        ).format(
+            condition=condition,
+            body=make_indented_body(body),
+            else_="else:" if else_body else "",
+            else_body=make_indented_body(else_body) if else_body else "",
+        )
+    )
+
+
+def test_while_False():
+    # The peephole optimizer removes while <falsey constant> blocks entirely.
+    check(
+        dedent(
+            """\
+            while False:
+                x = 1
+                y = 2
+            """
+        ),
+        ""
+    )

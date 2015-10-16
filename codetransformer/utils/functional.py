@@ -1,4 +1,15 @@
 from collections import deque
+from toolz import complement, flip
+
+
+def is_a(type_):
+    """More curryable version of isinstance."""
+    return flip(isinstance, type_)
+
+
+def not_a(type_):
+    """More curryable version of not isinstance."""
+    return complement(is_a(type_))
 
 
 def scanl(f, n, ns):
@@ -30,30 +41,6 @@ def scanl(f, n, ns):
     for m in ns:
         n = f(n, m)
         yield n
-
-
-def flip(f, a, b):
-    """Flips the argument order to f.
-
-    Parameters
-    ----------
-    f : callable
-        The function to call.
-    a : any
-        The second argument to f.
-    b : any
-        The first argument to f.
-
-    Returns
-    -------
-    c : any
-        f(b, a)
-    """
-    return f(b, a)
-
-
-def complement(predicate):
-    return lambda *args, **kwargs: not predicate(*args, **kwargs)
 
 
 def partition(predicate, elems):
