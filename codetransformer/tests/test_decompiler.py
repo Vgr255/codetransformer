@@ -60,10 +60,7 @@ def check(text, ast_text=None):
     decompiled_ast = Module(
         body=pycode_to_body(
             code,
-            DecompilationContext(
-                in_function=False,
-                next_store_is_function=False,
-            ),
+            DecompilationContext(in_function=False)
         )
     )
 
@@ -230,6 +227,18 @@ def test_simple_function():
             """
         )
     )
+
+
+def test_annotations():
+    check(
+        dedent(
+            """\
+            def foo(a: b, c=1, *args: d, e:f, g:h=i, **kwargs: j):
+                return a + c
+            """
+        )
+    )
+
 
 
 @pytest.mark.parametrize(

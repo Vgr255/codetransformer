@@ -21,8 +21,7 @@ class DecompilationError(Exception):
 class DecompilationContext(immutable,
                            defaults={
                                "in_function": False,
-                               "next_store_is_function": False,
-                               "next_store_is_closure": False,
+                               "make_function_context": None,
                                "top_of_loop": None}):
 
     """
@@ -30,10 +29,13 @@ class DecompilationContext(immutable,
     """
     __slots__ = (
         'in_function',
-        'next_store_is_function',
-        'next_store_is_closure',
+        'make_function_context',
         'top_of_loop',
     )
+
+
+class MakeFunctionContext(immutable):
+    __slots__ = ('closure',)
 
 
 def pycode_to_body(co, context):
@@ -84,6 +86,11 @@ def _instr(instr, queue, stack, body, context):
     )
 
 
+@_process_instr.register(instrs.EXTENDED_ARG)
+def _process_instr_extended_arg(instr, queue, stack, body, context):
+    pass
+
+
 @_process_instr.register(instrs.UNARY_NOT)
 @_process_instr.register(instrs.BINARY_SUBSCR)
 @_process_instr.register(instrs.LOAD_ATTR)
@@ -109,21 +116,17 @@ def _push(instr, queue, stack, body, context):
 
 
 @_process_instr.register(instrs.MAKE_FUNCTION)
+@_process_instr.register(instrs.MAKE_CLOSURE)
 def _make_function(instr, queue, stack, body, context):
     """
-    Set the `next_store_is_function` flag, then push `instr` onto the stack.
+    Set a make_function_context, then push onto the stack.
     """
     stack.append(instr)
-    return context.update(next_store_is_function=True)
-
-
-@_process_instr.register(instrs.MAKE_CLOSURE)
-def _make_closure(instr, queue, stack, body, context):
-    """
-    Set the `next_store_is_closure` flag, then push `instr` onto the stack.
-    """
-    stack.append(instr)
-    return context.update(next_store_is_closure=True)
+    return context.update(
+        make_function_context=MakeFunctionContext(
+            closure=isinstance(instr, instrs.MAKE_CLOSURE),
+        )
+    )
 
 
 @_process_instr.register(instrs.STORE_FAST)
@@ -131,12 +134,14 @@ def _make_closure(instr, queue, stack, body, context):
 def _store(instr, queue, stack, body, context):
     # This is set by MAKE_FUNCTION nodes to register that the next `STORE_NAME`
     # should create a FunctionDef node.
-    if context.next_store_is_function:
-        body.append(make_function(pop_arguments(instr, stack), closure=False))
-        return context.update(next_store_is_function=False)
-    elif context.next_store_is_closure:
-        body.append(make_function(pop_arguments(instr, stack), closure=True))
-        return context.update(next_store_is_closure=False)
+    if context.make_function_context is not None:
+        body.append(
+            make_function(
+                pop_arguments(instr, stack),
+                **context.make_function_context.to_dict()
+            ),
+        )
+        return context.update(make_function_context=None)
 
     body.append(
         ast.Assign(
@@ -756,7 +761,7 @@ def make_function(function_builders, *, closure):
     args, kwonly, varargs, varkwargs = paramnames(co)
 
     # Convert default and annotation builders.
-    defaults, kw_defaults, annotations = make_default_exprs(
+    defaults, kw_defaults, annotations = make_defaults_and_annotations(
         make_function_instr,
         builders,
     )
@@ -785,28 +790,27 @@ def make_function(function_builders, *, closure):
     return ast.FunctionDef(
         name=name.split('.')[-1],
         args=ast.arguments(
-            args=[ast.arg(arg=arg, annotation=None) for arg in args],
-            kwonlyargs=[ast.arg(arg=arg, annotation=None) for arg in kwonly],
+            args=[ast.arg(arg=a, annotation=annotations.get(a)) for a in args],
+            kwonlyargs=[
+                ast.arg(arg=a, annotation=annotations.get(a)) for a in kwonly
+            ],
             defaults=defaults,
             kw_defaults=list(map(kw_defaults.get, kwonly)),
             vararg=None if varargs is None else ast.arg(
-                arg=varargs, annotation=None
+                arg=varargs, annotation=annotations.get(varargs),
             ),
             kwarg=None if varkwargs is None else ast.arg(
-                arg=varkwargs, annotation=None
+                arg=varkwargs, annotation=annotations.get(varkwargs)
             ),
         ),
         body=dedupe_global_and_nonlocal_decls(
             pycode_to_body(
                 co,
-                DecompilationContext(
-                    in_function=True,
-                    next_store_is_function=False,
-                )
+                DecompilationContext(in_function=True),
             )
         ),
         decorator_list=decorators,
-        returns=None,
+        returns=annotations.get('return'),
     )
 
 
@@ -840,22 +844,29 @@ def dedupe_global_and_nonlocal_decls(body):
     return deduped + list(non_decls)
 
 
-def make_default_exprs(make_function_instr, default_builders):
+def make_defaults_and_annotations(make_function_instr, builders):
     """
-    Get the AST expressions corresponding to the defaults and kwonly defaults
-    for a function created by `make_function_instr`.
+    Get the AST expressions corresponding to the defaults, kwonly defaults, and
+    annotations for a function created by `make_function_instr`.
     """
     # Integer counts.
     n_defaults, n_kwonlydefaults, n_annotations = unpack_make_function_arg(
         make_function_instr.arg
     )
     if n_annotations:
-        raise DecompilationError("Don't know how to decompile annotations.")
+        # TOS should be a tuple of annotation names.
+        load_annotation_names = builders.pop()
+        annotations = dict(zip(
+            reversed(load_annotation_names.arg),
+            (make_expr(builders) for _ in range(n_annotations - 1))
+        ))
+    else:
+        annotations = {}
 
     kwonlys = {}
     while n_kwonlydefaults:
-        default_expr = make_expr(default_builders)
-        key_instr = default_builders.pop()
+        default_expr = make_expr(builders)
+        key_instr = builders.pop()
         if not isinstance(key_instr, instrs.LOAD_CONST):
             raise DecompilationError(
                 "kwonlydefault key is not a LOAD_CONST: %s" % key_instr
@@ -871,12 +882,12 @@ def make_default_exprs(make_function_instr, default_builders):
 
     defaults = []
     while n_defaults:
-        defaults.append(make_expr(default_builders))
+        defaults.append(make_expr(builders))
         n_defaults -= 1
 
     defaults.reverse()
 
-    return defaults, kwonlys, []  # Annotations not supported.
+    return defaults, kwonlys, annotations
 
 
 def unpack_make_function_arg(arg):
