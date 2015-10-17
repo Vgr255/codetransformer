@@ -92,6 +92,11 @@ def _process_instr_extended_arg(instr, queue, stack, body, context):
     pass
 
 
+@_process_instr.register(instrs.UNPACK_SEQUENCE)
+def _process_instr_unpack_sequence(instr, queue, stack, body, context):
+    body.append(make_assignment(instr, queue, stack))
+
+
 @_process_instr.register(instrs.IMPORT_NAME)
 def _process_instr_import_name(instr, queue, stack, body, context):
     """
@@ -282,11 +287,43 @@ def _store(instr, queue, stack, body, context):
         )
         return context.update(make_function_context=None)
 
-    body.append(
-        ast.Assign(
-            targets=[ast.Name(id=instr.arg, ctx=ast.Store())],
-            value=make_expr(pop_arguments(instr, stack)),
-        )
+    body.append(make_assignment(instr, queue, stack))
+
+
+def make_assignment(instr, queue, stack):
+    """
+    Make an ast.Assign node.
+    """
+    return ast.Assign(
+        targets=[make_assign_target(instr, queue)],
+        value=make_expr(stack),
+    )
+
+
+@singledispatch
+def make_assign_target(instr, queue):
+    """
+    Make an AST node for the LHS of an assignment beginning at `instr`.
+    """
+    raise DecompilationError("Can't make assignment for %s." % instr)
+
+
+@make_assign_target.register(instrs.STORE_FAST)
+@make_assign_target.register(instrs.STORE_NAME)
+@make_assign_target.register(instrs.STORE_DEREF)
+@make_assign_target.register(instrs.STORE_GLOBAL)
+def make_assign_target_store(instr, queue):
+    return ast.Name(id=instr.arg, ctx=ast.Store())
+
+
+@make_assign_target.register(instrs.UNPACK_SEQUENCE)
+def make_assign_target_unpack(instr, queue):
+    return ast.Tuple(
+        elts=[
+            make_assign_target(queue.popleft(), queue)
+            for _ in range(instr.arg)
+        ],
+        ctx=ast.Store(),
     )
 
 
