@@ -77,7 +77,10 @@ def test_trivial_expr_assign():
 
 
 def test_unpack_assign():
+    check("a, b = c")
+    check("(a,) = c")
     check("a, ((b, c, d), (e, f)) = g.h.i")
+
 
 
 def test_unary_not():
