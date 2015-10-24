@@ -177,7 +177,7 @@ def _pop_import_LOAD_ATTRs(module_name, queue):
     We don't need the LOAD_ATTRs to generate the correct AST, so we just throw
     it away.
     """
-    popped = list(popwhile(is_a(instrs.LOAD_ATTR), queue, side='left'))
+    popped = popwhile(is_a(instrs.LOAD_ATTR), queue, side='left')
     if popped:
         expected = module_name.split('.', maxsplit=1)[1]
         actual = '.'.join(map(op.attrgetter('arg'), popped))
@@ -440,7 +440,7 @@ def make_for_loop(loop_body_instrs, else_body_instrs, context):
     # Instructions from start until GET_ITER are the builders for the iterator
     # expression.
     iterator_expr = make_expr(
-        list(popwhile(not_a(instrs.GET_ITER), loop_body_instrs, side='left'))
+        popwhile(not_a(instrs.GET_ITER), loop_body_instrs, side='left')
     )
 
     # Next is the GET_ITER instruction, which we don't need.
@@ -616,12 +616,10 @@ def pop_loop_instrs(setup_loop_instr, queue):
     """
     # Grab everything from left side of the queue until the jump target of
     # SETUP_LOOP.
-    body = deque(popwhile(op.is_not(setup_loop_instr.arg), queue, side='left'))
+    body = popwhile(op.is_not(setup_loop_instr.arg), queue, side='left')
 
     # Anything after the last POP_BLOCK instruction is the else-block.
-    else_body = deque(
-        reversed(list(popwhile(not_a(instrs.POP_BLOCK), body, side='right')))
-    )
+    else_body = popwhile(not_a(instrs.POP_BLOCK), body, side='right')
 
     jump_to_top, pop_block = body[-2], body[-1]
     if not isinstance(jump_to_top, instrs.JUMP_ABSOLUTE):
@@ -1316,18 +1314,46 @@ def expect_instruction(instr, expected, context):
 def popwhile(cond, queue, *, side):
     """
     Pop elements off a queue while `cond(nextelem)` is True.
+
+    Parameters
+    ----------
+    cond : predicate
+    queue : deque
+    side : {'left', 'right'}
+
+    Returns
+    -------
+    popped : deque
+
+    Examples
+    --------
+    >>> from collections import deque
+    >>> d = deque([1, 2, 3, 2, 1])
+    >>> popwhile(lambda x: x < 3, d, side='left')
+    deque([1, 2])
+    >>> d
+    deque([3, 2, 1])
+    >>> popwhile(lambda x: x < 3, d, side='right')
+    deque([2, 1])
+    >>> d
+    deque([3])
     """
     if side not in ('left', 'right'):
         raise ValueError("`side` must be one of 'left' or 'right'")
 
+    out = deque()
+
     if side == 'left':
         popnext = queue.popleft
+        pushnext = out.append
         nextidx = 0
     else:
         popnext = queue.pop
+        pushnext = out.appendleft
         nextidx = -1
 
     while queue:
         if not cond(queue[nextidx]):
             break
-        yield popnext()
+        pushnext(popnext())
+    return out
