@@ -137,9 +137,7 @@ def _process_instr_import_name(instr, queue, stack, body, context):
         )
         return
     elif fromlist == ('*',):  # From module import *.
-        expect_instruction(
-            queue.popleft(), instrs.IMPORT_STAR, "after IMPORT_NAME"
-        )
+        expect(queue.popleft(), instrs.IMPORT_STAR, "after IMPORT_NAME")
         body.append(
             ast.ImportFrom(
                 module=module,
@@ -155,7 +153,7 @@ def _process_instr_import_name(instr, queue, stack, body, context):
     body.append(ast.ImportFrom(module=module, names=names, level=level))
 
     # Remove the final POP_TOP of the imported module.
-    expect_instruction(queue.popleft(), instrs.POP_TOP, "after 'from import'")
+    expect(queue.popleft(), instrs.POP_TOP, "after 'from import'")
 
 
 def _pop_import_LOAD_ATTRs(module_name, queue):
@@ -213,9 +211,8 @@ def make_importfrom_alias(queue, body, context, name):
     Consumes IMPORT_FROM and STORE_NAME instructions from queue.
     """
     import_from, store = queue.popleft(), queue.popleft()
-    expect_instruction(
-        import_from, instrs.IMPORT_FROM, "after IMPORT_NAME"
-    )
+    expect(import_from, instrs.IMPORT_FROM, "after IMPORT_NAME")
+
     update_global_and_nonlocal_decls(store, body, context)
     if not import_from.arg == name:
         raise DecompilationError(
@@ -1298,7 +1295,7 @@ def _check_stack_for_module_return(stack):
         )
 
 
-def expect_instruction(instr, expected, context):
+def expect(instr, expected, context):
     """
     Check that an instruction is of the expected type.
     """
