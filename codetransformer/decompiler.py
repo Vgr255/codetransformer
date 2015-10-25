@@ -114,8 +114,7 @@ def _process_instr_import_name(instr, queue, stack, body, context):
     # If this this is "from module import a, b fromlist will be ('a', 'b').
     fromlist = stack.pop().arg
 
-    # (optimization) level argument to __import__.  Should be 0, 1, or 2.
-    # Doesn't affect the AST.
+    # level argument to __import__.  Should be 0, 1, or 2.
     level = stack.pop().arg
 
     module = instr.arg
