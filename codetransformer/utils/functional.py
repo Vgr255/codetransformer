@@ -1,4 +1,3 @@
-from collections import deque
 from toolz import complement, flip
 
 

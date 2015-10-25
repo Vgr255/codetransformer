@@ -1,7 +1,6 @@
 import ast
 from collections import deque
 from functools import singledispatch
-from itertools import chain
 import types
 
 from toolz import complement, compose, curry
@@ -301,7 +300,8 @@ def make_assignment(instr, queue, stack):
     # Make assignment targets.
     # If there are multiple assignments (e.g. 'a = b = c'),
     # each LHS expression except the last is preceded by a DUP_TOP instruction.
-    # Thus, we make targets until we don't see a DUP_TOP, and then make one more.
+    # Thus, we make targets until we don't see a DUP_TOP, and then make one
+    # more.
     targets = []
     while isinstance(instr, instrs.DUP_TOP):
         targets.append(make_assign_target(queue.popleft(), queue, stack))
@@ -509,7 +509,8 @@ def make_for_loop(loop_body_instrs, else_body_instrs, context):
     # Next is FOR_ITER, which is the jump target for Continue nodes.
     top_of_loop = loop_body_instrs.popleft()
 
-    # This can be a STORE_* or an UNPACK_SEQUENCE followed by some number of stores.
+    # This can be a STORE_* or an UNPACK_SEQUENCE followed by some number of
+    # stores.
     target = make_assign_target(
         loop_body_instrs.popleft(),
         loop_body_instrs,
