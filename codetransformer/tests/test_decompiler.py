@@ -67,20 +67,54 @@ def check(text, ast_text=None):
 
     compare(decompiled_ast, ast)
 
+# Bodies for for/while loops.
+LOOP_BODIES = tuple(map(
+    '\n'.join,
+    combinations_with_replacement(
+        [
+            "x = 1",
+            "break",
+            "continue",
+            dedent(
+                """\
+                while u + v:
+                    w = z
+                """,
+            ),
+            dedent(
+                """\
+                for u in v:
+                    w = z
+                """,
+            ),
+        ],
+        3,
+    ),
+))
+# Bodies for for-else/while-else blocks.
+ORELSE_BODIES = ["", "x = 3"]
+# LHS of assignment, or bindings in a for-loop.
+NAME_BINDS = [
+    "a",
+    "(a, b)",
+    "(a,)",
+    "a, ((b, c, d), (e, f))",
+]
+
 
 def test_trivial_expr():
     check("a")
 
 
+@pytest.mark.parametrize(
+    'lhs,rhs', product(NAME_BINDS, ['x', 'x.y() + z.w()']),
+)
+def test_assign(lhs, rhs):
+    check("{lhs} = {rhs}".format(lhs=lhs, rhs=rhs))
+
+
 def test_trivial_expr_assign():
     check("a = b")
-
-
-def test_unpack_assign():
-    check("a, b = c")
-    check("(a,) = c")
-    check("a, ((b, c, d), (e, f)) = g.h.i")
-
 
 
 def test_unary_not():
@@ -422,39 +456,13 @@ def test_setitem():
     check("b[c + d][e] = a")
 
 
-LOOP_BODIES = tuple(map(
-    '\n'.join,
-    combinations_with_replacement(
-        [
-            "x = 1",
-            "break",
-            "continue",
-            dedent(
-                """\
-                while u + v:
-                    w = z
-                """,
-            ),
-            dedent(
-                """\
-                for u in v:
-                    w = z
-                """,
-            ),
-        ],
-        3,
-    ),
-))
-
-ORELSE_BODIES = ["", "x = 3"]
-
-
 @pytest.mark.parametrize(
     "loop,body,else_body",
     product(
         [
             "for a in b:",
             "for a in b.c.d:",
+            "for (a, (b, c), d) in e:"
         ],
         LOOP_BODIES,
         ORELSE_BODIES,

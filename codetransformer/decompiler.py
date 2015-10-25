@@ -446,14 +446,8 @@ def make_for_loop(loop_body_instrs, else_body_instrs, context):
     # Next is FOR_ITER, which is the jump target for Continue nodes.
     top_of_loop = loop_body_instrs.popleft()
 
-    store_instr = loop_body_instrs.popleft()
-    if not isinstance(store_instr, instrs.STORE_NAME):
-        raise DecompilationError(
-            "Don't know how to bind loop variable with %s" % store_instr,
-        )
-
-    # TODO: Share code with assignments.
-    target = ast.Name(id=store_instr.arg, ctx=ast.Store())
+    # This can be a STORE_* or an UNPACK_SEQUENCE followed by some number of stores.
+    target = make_assign_target(loop_body_instrs.popleft(), loop_body_instrs)
 
     body, orelse_body = make_loop_body_and_orelse(
         top_of_loop, loop_body_instrs, else_body_instrs, context
