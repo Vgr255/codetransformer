@@ -365,7 +365,7 @@ def make_assign_target_unpack(instr, queue, stack):
 @make_assign_target.register(instrs.BINARY_SUBSCR)
 def make_assign_target_load_name(instr, queue, stack):
     # We hit this case when a setattr or setitem is nested in a more complex
-    # assigment.  Just push the load onto the stack to be processed by the
+    # assignment.  Just push the load onto the stack to be processed by the
     # upcoming STORE_ATTR or STORE_SUBSCR.
     stack.append(instr)
     return make_assign_target(queue.popleft(), queue, stack)
