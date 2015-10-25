@@ -617,3 +617,89 @@ def test_import_in_function():
             """
         )
     )
+
+
+def test_with_block():
+    check(
+        dedent(
+            """
+            with a.b.c:
+                c = d
+                e = f()
+            """
+        )
+    )
+
+    # Tests for various kinds of stores from the with assignment.
+    check(
+        dedent(
+            """
+            with a as b:
+                c = d
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """
+            def foo():
+                with a as b:
+                    c = d
+                return None
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """
+            def foo():
+                global b
+                with a as b:
+                    c = d
+                return None
+            """
+        )
+    )
+
+    check(
+        dedent(
+            """
+            def foo():
+                with a as b:
+                    def bar():
+                        nonlocal b
+                        b = None
+                        return c
+                return None
+            """
+        )
+    )
+
+
+def test_nested_with():
+    check(
+        dedent(
+            """
+            with a:
+                with b:
+                    x = 3
+                y = 4
+            """
+        )
+    )
+    # This is indistinguishable in bytecode from:
+    # with a:
+    #     with b:
+    #         with c as d:
+    #             e = f
+    # We normalize the former to the latter.
+    check(
+        dedent(
+            """
+            with a, b, c as d:
+                e = f
+            """
+        ),
+    )

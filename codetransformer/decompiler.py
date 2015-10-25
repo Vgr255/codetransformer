@@ -9,7 +9,7 @@ import toolz.curried.operator as op
 
 from .code import Code, Flags
 from . import instructions as instrs
-from .utils.functional import partition, not_a, is_a
+from .utils.functional import not_a, is_a
 from .utils.immutable import immutable
 from codetransformer import a as showa, d as showd  # noqa
 
@@ -43,7 +43,10 @@ def pycode_to_body(co, context):
     Convert a Python code object to a list of AST body elements.
     """
     code = Code.from_pycode(co)
-    return instrs_to_body(deque(code.instrs), context)
+    body = instrs_to_body(deque(code.instrs), context)
+    if context.in_function:
+        return make_global_and_nonlocal_decls(code.instrs) + body
+    return body
 
 
 def instrs_to_body(instrs, context):
@@ -120,7 +123,6 @@ def _process_instr_import_name(instr, queue, stack, body, context):
     if fromlist is None:  # Regular import.
         _pop_import_LOAD_ATTRs(module, queue)
         store = queue.popleft()
-        update_global_and_nonlocal_decls(store, body, context)
         asname = store.arg
         body.append(
             ast.Import(
@@ -213,7 +215,6 @@ def make_importfrom_alias(queue, body, context, name):
     import_from, store = queue.popleft(), queue.popleft()
     expect(import_from, instrs.IMPORT_FROM, "after IMPORT_NAME")
 
-    update_global_and_nonlocal_decls(store, body, context)
     if not import_from.arg == name:
         raise DecompilationError(
             "IMPORT_FROM name mismatch. Expected %r, but got %s." % (
@@ -272,7 +273,6 @@ def _make_function(instr, queue, stack, body, context):
 @_process_instr.register(instrs.STORE_DEREF)
 @_process_instr.register(instrs.STORE_GLOBAL)
 def _store(instr, queue, stack, body, context):
-    update_global_and_nonlocal_decls(instr, body, context)
     # This is set by MAKE_FUNCTION nodes to register that the next `STORE_NAME`
     # should create a FunctionDef node.
     if context.make_function_context is not None:
@@ -370,31 +370,6 @@ def make_assign_target_load_name(instr, queue, stack):
     return make_assign_target(queue.popleft(), queue, stack)
 
 
-@singledispatch
-def update_global_and_nonlocal_decls(instr, body, context):
-    raise DecompilationError(
-        "Can't update global/nonlocal declarations with %s" % instr
-    )
-
-
-@update_global_and_nonlocal_decls.register(instrs.STORE_DEREF)
-def _update_decls_deref(instr, body, context):
-    if instr.vartype == 'cell':
-        body.append(ast.Nonlocal(names=[instr.arg]))
-
-
-@update_global_and_nonlocal_decls.register(instrs.STORE_GLOBAL)
-def _update_decls_global(instr, body, context):
-    if context.in_function:
-        body.append(ast.Global(names=[instr.arg]))
-
-
-@update_global_and_nonlocal_decls.register(instrs.STORE_FAST)
-@update_global_and_nonlocal_decls.register(instrs.STORE_NAME)
-def _update_decls_noop(instr, body, context):
-    pass
-
-
 @_process_instr.register(instrs.STORE_ATTR)
 @_process_instr.register(instrs.STORE_SUBSCR)
 def _store_subscr(instr, queue, stack, body, context):
@@ -433,6 +408,79 @@ def _jump_absolute(instr, queue, stack, body, context):
         body.append(ast.Continue())
         return
     raise DecompilationError("Don't know how to decompile %s." % instr)
+
+
+@_process_instr.register(instrs.SETUP_WITH)
+def _process_instr_setup_with(instr, queue, stack, body, context):
+    items = [make_withitem(queue, stack)]
+    block_body = instrs_to_body(
+        pop_with_body_instrs(instr, queue),
+        context,
+    )
+
+    # Handle compound with statement (e.g. "with a, b").
+    if len(block_body) == 1 and isinstance(block_body[0], ast.With):
+        nested_with = block_body[0]
+        # Merge the inner block's items with our top-level items.
+        items += nested_with.items
+        # Use the inner block's body as the real body.
+        block_body = nested_with.body
+
+    return body.append(
+        ast.With(items=items, body=block_body)
+    )
+
+
+def pop_with_body_instrs(setup_with_instr, queue):
+    """
+    Pop instructions from `queue` that form the body of a with block.
+    """
+    body_instrs = popwhile(op.is_not(setup_with_instr.arg), queue, side='left')
+
+    # Last two instructions should always be POP_BLOCK, LOAD_CONST(None).
+    # These don't correspond to anything in the AST, so remove them here.
+    load_none = body_instrs.pop()
+    expect(load_none, instrs.LOAD_CONST, "at end of with-block")
+    pop_block = body_instrs.pop()
+    expect(pop_block, instrs.POP_BLOCK, "at end of with-block")
+    if load_none.arg is not None:
+        raise DecompilationError(
+            "Expected LOAD_CONST(None), but got "
+            "LOAD_CONST of %r instead" % (load_none.arg,)
+        )
+
+    # Target of the setup_with should be a WITH_CLEANUP instruction followed by
+    # an END_FINALLY.  Neither of these correspond to anything in the AST.
+    with_cleanup = queue.popleft()
+    expect(with_cleanup, instrs.WITH_CLEANUP, "at end of with-block")
+    end_finally = queue.popleft()
+    expect(end_finally, instrs.END_FINALLY, "at end of with-block")
+
+    return body_instrs
+
+
+def make_withitem(queue, stack):
+    """
+    Make an ast.withitem node.
+    """
+    context_expr = make_expr(stack)
+    # This is a POP_TOP for just "with <expr>:".
+    # This is a STORE_NAME(name) for "with <expr> as <name>:".
+    as_instr = queue.popleft()
+    if isinstance(as_instr, (instrs.STORE_FAST,
+                             instrs.STORE_NAME,
+                             instrs.STORE_DEREF,
+                             instrs.STORE_GLOBAL)):
+        return ast.withitem(
+            context_expr=context_expr,
+            optional_vars=make_assign_target(as_instr, queue, stack),
+        )
+    elif isinstance(as_instr, instrs.POP_TOP):
+        return ast.withitem(context_expr=context_expr, optional_vars=None)
+    else:
+        raise DecompilationError(
+            "Don't know how to make withitem from %s" % as_instr,
+        )
 
 
 @_process_instr.register(instrs.SETUP_LOOP)
@@ -1088,47 +1136,31 @@ def make_function(function_builders, *, closure):
                 arg=varkwargs, annotation=annotations.get(varkwargs)
             ),
         ),
-        body=dedupe_global_and_nonlocal_decls(
-            pycode_to_body(
-                co,
-                DecompilationContext(in_function=True),
-            )
-        ),
+        body=pycode_to_body(co, DecompilationContext(in_function=True)),
         decorator_list=decorators,
         returns=annotations.get('return'),
     )
 
 
-def is_declaration(node):
-    return isinstance(node, (ast.Nonlocal, ast.Global))
-
-
-def dedupe_global_and_nonlocal_decls(body):
+def make_global_and_nonlocal_decls(code_instrs):
     """
-    Remove duplicate `ast.Global` and `ast.Nonlocal` nodes from the body of a
-    function.
+    Find all STORE_GLOBAL and STORE_DEREF instructions in `instrs` and convert
+    them into a canonical list of `ast.Global` and `ast.Nonlocal` declarations.
     """
-    decls, non_decls = map(list, partition(is_declaration, body))
-    globals_, nonlocals_ = partition(
-        lambda n: isinstance(n, ast.Global), decls
-    )
+    globals_ = list(sorted(set(
+        i.arg for i in code_instrs if isinstance(i, instrs.STORE_GLOBAL)
+    )))
+    nonlocals = list(sorted(set(
+        i.arg for i in code_instrs
+        if isinstance(i, instrs.STORE_DEREF) and i.vartype == 'cell'
+    )))
 
-    deduped = []
-    global_names = list(
-        sorted(
-            set(chain.from_iterable(node.names for node in globals_))
-        )
-    )
-    if global_names:
-        deduped.append(ast.Global(global_names))
-
-    nonlocal_names = list(
-        sorted(set(chain.from_iterable(node.names for node in nonlocals_)))
-    )
-    if nonlocal_names:
-        deduped.append(ast.Nonlocal(nonlocal_names))
-
-    return deduped + list(non_decls)
+    out = []
+    if globals_:
+        out.append(ast.Global(names=globals_))
+    if nonlocals:
+        out.append(ast.Nonlocal(names=nonlocals))
+    return out
 
 
 def make_defaults_and_annotations(make_function_instr, builders):

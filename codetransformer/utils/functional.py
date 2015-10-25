@@ -41,32 +41,3 @@ def scanl(f, n, ns):
     for m in ns:
         n = f(n, m)
         yield n
-
-
-def partition(predicate, elems):
-    """
-    Partition an iterable into values matching a predicate and values not
-    matching a predicate.
-
-    FUTURE_OPTIMIZATION: Use Joe's ugly version of this.
-    """
-    elems = iter(elems)
-    _trues, _falses = deque(), deque()
-
-    def pop_all(d):
-        while d:
-            yield d.pop()
-
-    def gen(pred, trues, falses):
-        while True:
-            yield from pop_all(trues)
-            n = next(elems)
-            if predicate(n):
-                trues.appendleft(n)
-            else:
-                falses.appendleft(n)
-
-    return (
-        gen(predicate, _trues, _falses),
-        gen(complement(predicate), _falses, _trues)
-    )
