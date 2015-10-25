@@ -588,8 +588,8 @@ def pop_loop_instrs(setup_loop_instr, queue):
     JUMP_ABSOLUTE instruction at the end of the loop.  If it jumps to a
     FOR_ITER, then this is a for-loop.  Otherwise it's a while-loop.
 
-    The jump we want is the first JUMP_ABSOLUTE instruction prior to the jump
-    target of `setup_loop_instr`.
+    The jump we want to inspect is the first JUMP_ABSOLUTE instruction prior to
+    the jump target of `setup_loop_instr`.
 
     Parameters
     ----------
