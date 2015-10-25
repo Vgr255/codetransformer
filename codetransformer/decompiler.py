@@ -121,6 +121,9 @@ def _process_instr_import_name(instr, queue, stack, body, context):
     if fromlist is None:  # Regular import.
         attr_loads = _pop_import_LOAD_ATTRs(module, queue)
         store = queue.popleft()
+        # There are two cases where we should emit an alias:
+        # import a as <anything but a>
+        # import a.b.c as <anything (including a)>
         if attr_loads or module.split('.')[0] != store.arg:
             asname = store.arg
         else:
