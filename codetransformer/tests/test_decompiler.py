@@ -113,6 +113,18 @@ def test_assign(lhs, rhs):
     check("{lhs} = {rhs}".format(lhs=lhs, rhs=rhs))
 
 
+def test_unpack_to_attribute():
+    check("((a.b, c.d.e), f) = g")
+    check("((a[b], c[d][e]), f) = g")
+    check("((a[b].c, d.e[f]), g) = h")
+
+
+def test_chained_assign():
+    check("a = b = c = d")
+    check("a.b = (c,) = d[e].f = g")
+    check("a.b = (c, d[e].f) = g")
+
+
 def test_unary_not():
     check("a = not b")
     check("a = not not b")

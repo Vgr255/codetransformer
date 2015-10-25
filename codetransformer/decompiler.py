@@ -287,41 +287,87 @@ def _store(instr, queue, stack, body, context):
     body.append(make_assignment(instr, queue, stack))
 
 
+@_process_instr.register(instrs.DUP_TOP)
+def _dup_top(instr, queue, stack, body, context):
+    body.append(make_assignment(instr, queue, stack))
+
+
 def make_assignment(instr, queue, stack):
     """
     Make an ast.Assign node.
     """
-    return ast.Assign(
-        targets=[make_assign_target(instr, queue)],
-        value=make_expr(stack),
-    )
+    value = make_expr(stack)
+
+    # Make assignment targets.
+    # If there are multiple assignments (e.g. 'a = b = c'),
+    # each LHS expression except the last is preceded by a DUP_TOP instruction.
+    # Thus, we make targets until we don't see a DUP_TOP, and then make one more.
+    targets = []
+    while isinstance(instr, instrs.DUP_TOP):
+        targets.append(make_assign_target(queue.popleft(), queue, stack))
+        instr = queue.popleft()
+
+    targets.append(make_assign_target(instr, queue, stack))
+
+    return ast.Assign(targets=targets, value=value)
 
 
 @singledispatch
-def make_assign_target(instr, queue):
+def make_assign_target(instr, queue, stack):
     """
     Make an AST node for the LHS of an assignment beginning at `instr`.
     """
-    raise DecompilationError("Can't make assignment for %s." % instr)
+    raise DecompilationError("Can't make assignment target for %s." % instr)
 
 
 @make_assign_target.register(instrs.STORE_FAST)
 @make_assign_target.register(instrs.STORE_NAME)
 @make_assign_target.register(instrs.STORE_DEREF)
 @make_assign_target.register(instrs.STORE_GLOBAL)
-def make_assign_target_store(instr, queue):
+def make_assign_target_store(instr, queue, stack):
     return ast.Name(id=instr.arg, ctx=ast.Store())
 
 
+@make_assign_target.register(instrs.STORE_ATTR)
+def make_assign_target_setattr(instr, queue, stack):
+    return ast.Attribute(
+        value=make_expr(stack),
+        attr=instr.arg,
+        ctx=ast.Store(),
+    )
+
+
+@make_assign_target.register(instrs.STORE_SUBSCR)
+def make_assign_target_setitem(instr, queue, stack):
+    slice_ = make_slice(stack)
+    collection = make_expr(stack)
+    return ast.Subscript(
+        value=collection,
+        slice=slice_,
+        ctx=ast.Store(),
+    )
+
+
 @make_assign_target.register(instrs.UNPACK_SEQUENCE)
-def make_assign_target_unpack(instr, queue):
+def make_assign_target_unpack(instr, queue, stack):
     return ast.Tuple(
         elts=[
-            make_assign_target(queue.popleft(), queue)
+            make_assign_target(queue.popleft(), queue, stack)
             for _ in range(instr.arg)
         ],
         ctx=ast.Store(),
     )
+
+
+@make_assign_target.register(instrs.LOAD_NAME)
+@make_assign_target.register(instrs.LOAD_ATTR)
+@make_assign_target.register(instrs.BINARY_SUBSCR)
+def make_assign_target_load_name(instr, queue, stack):
+    # We hit this case when a setattr or setitem is nested in a more complex
+    # assigment.  Just push the load onto the stack to be processed by the
+    # upcoming STORE_ATTR or STORE_SUBSCR.
+    stack.append(instr)
+    return make_assign_target(queue.popleft(), queue, stack)
 
 
 @singledispatch
@@ -350,42 +396,11 @@ def _update_decls_noop(instr, body, context):
 
 
 @_process_instr.register(instrs.STORE_ATTR)
-def _store_attr(instr, queue, stack, body, context):
-    target = make_expr(stack)
-    rhs = make_expr(stack)
-    body.append(
-        ast.Assign(
-            targets=[
-                ast.Attribute(
-                    value=target,
-                    attr=instr.arg,
-                    ctx=ast.Store(),
-                )
-            ],
-            value=rhs,
-        )
-    )
-
-
 @_process_instr.register(instrs.STORE_SUBSCR)
 def _store_subscr(instr, queue, stack, body, context):
-
-    slice_ = make_slice(stack)
-    collection = make_expr(stack)
+    target = make_assign_target(instr, queue, stack)
     rhs = make_expr(stack)
-
-    body.append(
-        ast.Assign(
-            targets=[
-                ast.Subscript(
-                    value=collection,
-                    slice=slice_,
-                    ctx=ast.Store(),
-                ),
-            ],
-            value=rhs,
-        ),
-    )
+    body.append(ast.Assign(targets=[target], value=rhs))
 
 
 @_process_instr.register(instrs.POP_TOP)
@@ -447,7 +462,11 @@ def make_for_loop(loop_body_instrs, else_body_instrs, context):
     top_of_loop = loop_body_instrs.popleft()
 
     # This can be a STORE_* or an UNPACK_SEQUENCE followed by some number of stores.
-    target = make_assign_target(loop_body_instrs.popleft(), loop_body_instrs)
+    target = make_assign_target(
+        loop_body_instrs.popleft(),
+        loop_body_instrs,
+        stack=[],
+    )
 
     body, orelse_body = make_loop_body_and_orelse(
         top_of_loop, loop_body_instrs, else_body_instrs, context
