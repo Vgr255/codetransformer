@@ -120,17 +120,18 @@ def _process_instr_import_name(instr, queue, stack, body, context):
 
     module = instr.arg
     if fromlist is None:  # Regular import.
-        _pop_import_LOAD_ATTRs(module, queue)
+        attr_loads = _pop_import_LOAD_ATTRs(module, queue)
         store = queue.popleft()
-        asname = store.arg
+        if attr_loads or module.split('.')[0] != store.arg:
+            asname = store.arg
+        else:
+            asname = None
         body.append(
             ast.Import(
                 names=[
                     ast.alias(
                         name=module,
-                        asname=(
-                            asname if asname != module.split('.')[0] else None
-                        )
+                        asname=(asname),
                     ),
                 ],
                 level=level,
@@ -172,9 +173,6 @@ def _pop_import_LOAD_ATTRs(module_name, queue):
                    12 LOAD_ATTR                2 (c)
                    15 LOAD_ATTR                3 (d)
                    18 STORE_NAME               3 (d)
-
-    We don't need the LOAD_ATTRs to generate the correct AST, so we just throw
-    it away.
     """
     popped = popwhile(is_a(instrs.LOAD_ATTR), queue, side='left')
     if popped:
@@ -186,6 +184,7 @@ def _pop_import_LOAD_ATTRs(module_name, queue):
                     expected, actual,
                 )
             )
+    return popped
 
 
 @curry

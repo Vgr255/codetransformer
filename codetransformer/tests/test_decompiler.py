@@ -580,6 +580,10 @@ def test_import_star():
     check("from a.b.c import *")
 
 
+def test_import_attribute_aliasing_module():
+    check("import a.b as a")
+
+
 def test_import_in_function():
     check(
         dedent(
