@@ -113,10 +113,6 @@ def test_assign(lhs, rhs):
     check("{lhs} = {rhs}".format(lhs=lhs, rhs=rhs))
 
 
-def test_trivial_expr_assign():
-    check("a = b")
-
-
 def test_unary_not():
     check("a = not b")
     check("a = not not b")
