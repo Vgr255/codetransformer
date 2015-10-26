@@ -99,34 +99,41 @@ class overloaded_dicts(CodeTransformer):
 
         yield instr
 
-    @pattern(instructions.STORE_MAP)
-    def _store_map(self, instr):
-        # TOS  = k
-        # TOS1 = v
-        # TOS2 = m
-        # TOS3 = m
+    try:
 
-        yield instructions.ROT_THREE().steal(instr)
-        # TOS  = v
-        # TOS1 = m
-        # TOS2 = k
-        # TOS3 = m
+        @pattern(instructions.STORE_MAP)
+        def _store_map(self, instr):
+            # TOS  = k
+            # TOS1 = v
+            # TOS2 = m
+            # TOS3 = m
 
-        yield instructions.ROT_THREE()
-        # TOS  = m
-        # TOS1 = k
-        # TOS2 = v
-        # TOS3 = m
+            yield instructions.ROT_THREE().steal(instr)
+            # TOS  = v
+            # TOS1 = m
+            # TOS2 = k
+            # TOS3 = m
 
-        yield instructions.ROT_TWO()
-        # TOS  = k
-        # TOS1 = m
-        # TOS2 = v
-        # TOS3 = m
+            yield instructions.ROT_THREE()
+            # TOS  = m
+            # TOS1 = k
+            # TOS2 = v
+            # TOS3 = m
 
-        yield instructions.STORE_SUBSCR()
-        # TOS  = m
+            yield instructions.ROT_TWO()
+            # TOS  = k
+            # TOS1 = m
+            # TOS2 = v
+            # TOS3 = m
 
+            yield instructions.STORE_SUBSCR()
+            # TOS  = m
+
+    except AttributeError:
+
+        def _store_map(self, instr):
+            raise NotImplementedError("The 'STORE_MAP' opcode is "
+                                      "not supported in CPython 3.5+")
 
 ordereddict_literals = overloaded_dicts(OrderedDict)
 
